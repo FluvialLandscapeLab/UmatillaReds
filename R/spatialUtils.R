@@ -1,6 +1,48 @@
-distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
-  if(any(sapply(spLines@lines, function(.l) length(.l@Lines)) > 1)) stop("All Lines in the SpatialLines object 'spLines' must be simplified (e.g., can only contain one sp Line object)")
+.fractionBetween = function(xy, bracket) {
+  frac = (xy-bracket[1,])/(bracket[2,]-bracket[1,])
+  return(frac[!is.nan(frac)][1])
+}
 
+spatialLinesFromEndPoints = function(coords1, coords2, proj4string) {
+  if(!is.matrix(coords1) || !is.matrix(coords2)) stop("Coordinates must be of type 'matrix'")
+  if(nrow(coords1) != nrow(coords2)) stop("Coordinate matricies must have the same number of rows.")
+  if(ncol(coords1) != ncol(coords2) || ncol(coords1) != 2) stop("Coordinate matricies must have 2 columns each.")
+  segList = lapply(
+    1:nrow(coords1), 
+    function(.i) {
+      Lines(
+        list(
+          Line(
+            rbind(
+              coords1[.i,],
+              coords2[.i,]
+            )
+          )
+        ),
+        .i
+      )
+    }
+  )
+  return(SpatialLines(segList, proj4string = proj4string))
+}
+
+contourLinesSGDF = function(grid, zVal, ...) {
+  xyz = cbind(coordinates(grid), grid[[zVal]])
+  dimnames(xyz) = list(NULL, c(coordnames(grid), zVal))
+  #sort data first by x, then by y, so it fills the matrix correctly...
+  xyz = xyz[do.call(order, lapply((2:1), function(i) xyz[, i])), ]
+  
+  zMatrix = matrix(xyz[,3], grid@grid@cells.dim[1], grid@grid@cells.dim[2])
+  SLDF = ContourLines2SLDF(contourLines(x = unique(xyz[,1]), y = unique(xyz[,2]), z = zMatrix, ...), proj4string = grid@proj4string)
+  coordnames(SLDF) = coordnames(grid)
+  return(SLDF)
+}
+
+
+distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
+  
+  if(any(sapply(spLines@lines, function(.l) length(.l@Lines)) > 1)) stop("All Lines in the SpatialLines object 'spLines' must be simplified (e.g., can only contain one sp Line object).  Consider calling explodeSpatialLines() before distanceAlongLines().")
+  
   #count the segments in each (simple) lines object
   segCounts = sapply(spLines@lines, function(.l) nrow(.l@Lines[[1]]@coords) - 1)
   #determine the starting value of segment IDs for each Lines object so that all
@@ -15,11 +57,11 @@ distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
       startIDs,
       SIMPLIFY = F
     )
-
+  
   #determine row IDs for the dataframes, built below.  row IDs are equal to the
   #unique ID's of each segment
   rowIDs = lapply(segments, function(.s) as.character(sapply(.s, function(.s1) .s1@ID)))
-
+  
   #make a SpatialLines object for the segments of each Lines object in spLines  
   segments = lapply(segments, SpatialLines, proj4string = spLines@proj4string)
   # convert SpatialLines objects into SpatialLinesDataFrame objects to store the
@@ -41,6 +83,10 @@ distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
       rowIDs,
       SIMPLIFY = F
     )
+  
+  
+  
+  
   # get the length of each segment
   segLengthList = 
     lapply(
@@ -88,14 +134,14 @@ distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
   #Now map the line IDs to the points, using segIdx (because there can be more
   #than one point associated with any segment)
   lineIdx = lineIdx[segIdx]
-
+  
   #Get the endpoints of each segment 
   segmentXYs = lapply(segments@lines, function(.l) coordinates(.l@Lines[[1]]))
   names(segmentXYs) = row.names(segments)
   
   #Calculate the fraction of the segment length at the point.
   fracOfSegment = mapply(
-    fractionBetween,
+    .fractionBetween,
     lapply(1:length(segIdx), function(.i) coordinates(x)[.i,]),
     segmentXYs[segIdx]
   )
@@ -110,23 +156,6 @@ distAlongSpatialLines = function(x, spLines, maxDist = NA, withAttrs = TRUE) {
   return(x)
 }
 
-fractionBetween = function(xy, bracket) {
-  frac = (xy-bracket[1,])/(bracket[2,]-bracket[1,])
-  return(frac[!is.nan(frac)][1])
-}
-
-contourLinesSGDF = function(grid, zVal, ...) {
-  xyz = cbind(coordinates(grid), grid[[zVal]])
-  dimnames(xyz) = list(NULL, c(coordnames(grid), zVal))
-  #sort data first by x, then by y, so it fills the matrix correctly...
-  xyz = xyz[do.call(order, lapply((2:1), function(i) xyz[, i])), ]
-  
-  zMatrix = matrix(xyz[,3], grid@grid@cells.dim[1], grid@grid@cells.dim[2])
-  SLDF = ContourLines2SLDF(contourLines(x = unique(xyz[,1]), y = unique(xyz[,2]), z = zMatrix, ...), proj4string = grid@proj4string)
-  coordnames(SLDF) = coordnames(grid)
-  return(SLDF)
-}
-
 #returns a list of Lines objects, each containing a single Line object consisting of one segment
 explodeLine = function(x, startID = 0) { #x is a Line objext
   coords = coordinates(x)
@@ -134,13 +163,15 @@ explodeLine = function(x, startID = 0) { #x is a Line objext
   return(segs)
 }
 
-#returns a line of Lines object, each containing a single Line object of 1 or more segments.
+#returns a list of Lines object, each containing a single Line object of 1 or more segments.
 explodeLines = function(x, startID = 0) { #x is a object of type Lines
   return(
     lapply(1:length(x@Lines), function(.i) Lines(list(x@Lines[[.i]]), as.character(.i + startID - 1)))
   )
 }
 
+# returns an object of type SpatialLines or SpatialLinesDataFrame (determined by class of x argument)
+# with each Line object in x in its own Lines object.
 explodeSpatialLines = function(x) {
   lineCounts = sapply(x@lines, function(.x) length(.x@Lines))
   xIDs = data.frame(OrigID = sapply(x@lines, function(.x) return(.x@ID)))
@@ -167,7 +198,7 @@ explodeSpatialLines = function(x) {
   return(x)
 }
 
-makePattern = function(xLen, patternDistances, offset) {
+.makePattern = function(xLen, patternDistances, offset) {
   patternLength = sum(patternDistances)
   if((patternLength + offset) > xLen) stop("Offset plus sum of patternDistances can't exceed the line length.")
   nRepeat = as.integer((xLen-offset)/patternLength)+1
@@ -199,7 +230,7 @@ pointsAlongLine = function(x, distances = fractions * LineLength(x), fractions =
 repeatAlongLine = function(x, patternDistances, offset = 0, proj4string) {
   return(
     SpatialPointsDataFrame(
-      pointsAlongLine(x, makePattern(LineLength(x), patternDistances, offset)),
+      pointsAlongLine(x, .makePattern(LineLength(x), patternDistances, offset)),
       data.frame(distance = patternDistances),
       proj4string = proj4string
     )
@@ -207,7 +238,7 @@ repeatAlongLine = function(x, patternDistances, offset = 0, proj4string) {
 }
 
 repeatAlongLines = function(x, patternDistances, offset = 0, proj4string) {
-  patternDistances = makePattern(LinesLength(x), patternDistances, offset)
+  patternDistances = .makePattern(LinesLength(x), patternDistances, offset)
   return(
     SpatialPointsDataFrame(
       pointsAlongLines(x, patternDistances),
@@ -217,6 +248,12 @@ repeatAlongLines = function(x, patternDistances, offset = 0, proj4string) {
   )
 }
 
+segLengths = function(x) {
+  coords = coordinates(x)
+  nSegs = nrow(coords) - 1
+  # pythagorian theorum
+  return(sqrt(apply((coords[2:(nSegs +1),] - coords[1:nSegs,])^2, 1, sum)))
+}
 
 ## This fuction needs to find any vertices where only two lines meet and join 
 ## the lines into a single line.  When the length of the vector in 
@@ -295,6 +332,23 @@ simplifySpatialLines = function(x, minSpurLength) { #x is Lines object
   return(x)  
 }
 
+segmentLine = function(x, segStartDistance, segEndDistance, fractions = F) {
+  if (fractions) {
+    segStartDistance = segStartDistance * LineLength(x)
+    segEndDistance = segEndDistance * LineLength(x)
+  }
+  if(any(c(segStartDistance, segEndDistance) < 0 || 
+         c(segStartDistance, segEndDistance) > LineLength(x))) {
+    stop("if fracitons==F, all values in distance argument must be 0 < distances < length(x); if fractions == T, all values must be 0 < fractions < 1.")
+  }
+  startPoints = pointsAlongLine(x, segStartDistance)
+  endPoints = pointsAlongLine(x, segEndDistance)
+
+  vertexDist = c(0, cumsum(segLengths(x)))
+#  get the coordinates that go along with the vertexDistances that are between start and end
+#  segCoords = lapply(seq(along = startPoints))
+}
+
 splitLine = function(x, distances = fractions * LineLength(x), fractions = distances / LineLength(x)) { # x is a Line object
   if(any(fractions<=0.0 || fractions >= 1.0)) stop("all values in distances argument must be 0 < distances < length(x); all values in fractions argument must be 0 < fractions < 1.")
   if(!identical(unique(fractions), fractions)) stop("Distances and fractions can not be duplicated.")
@@ -317,7 +371,7 @@ splitLine = function(x, distances = fractions * LineLength(x), fractions = dista
   
   # determine duplicate values
   lVD = length(vertexDist)
-  isDuplicate = vertexDist[1:lVD-1]==vertexDist[2:lVD]
+  isDuplicate = vertexDist[1:lVD-1] == vertexDist[2:lVD]
   isDuplicate = c(F, isDuplicate) | c(isDuplicate, F)
   
   # Duplicate points are caused with a split point aligns with a line vertex. 
@@ -339,7 +393,9 @@ splitLine = function(x, distances = fractions * LineLength(x), fractions = dista
   return(LineList)
 }
 
-splitLines = function(x, IDs, distances = fractions * LinesLength(x), fractions = distances / LinesLength(x)) { # x is a Lines object
+splitLines2 = function(x, startDistance ) {}
+
+splitLines = function(x, distances = fractions * LinesLength(x), fractions = distances / LinesLength(x), IDs = as.character(seq(0,length(distances)))) { # x is a Lines object
   if(length(x@Lines) > 1) stop("The Lines object 'x' must be a simple line (e.g., can only have one 'Line' object in the 'Lines' slot).  Consider using 'explode' to convert polylines to simple lines.")
   if(length(IDs) != length(distances)+1) stop("The number of ID's must be one greater than the number of distances or fractions provided.")
   if(!identical(unique(IDs), IDs)) stop("IDs must be unique.")
